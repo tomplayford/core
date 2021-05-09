@@ -1,0 +1,14 @@
+{
+  "domain": "helvar",
+  "name": "HelvarNet",
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/helvar",
+  "requirements": [],
+  "ssdp": [],
+  "zeroconf": [],
+  "homekit": {},
+  "dependencies": [],
+  "codeowners": [
+    "@tomplayford"
+  ]
+}
