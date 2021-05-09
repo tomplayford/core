@@ -1,0 +1,8 @@
+"""Constants for the HelvarNet integration."""
+
+DOMAIN = "helvar"
+
+DEFAULT_ON_GROUP_SCENE = 1
+DEFAULT_ON_GROUP_BLOCK = 1
+DEFAULT_OFF_GROUP_BLOCK = 1
+DEFAULT_OFF_GROUP_SCENE = 16
