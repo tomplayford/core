@@ -19,6 +19,7 @@ from .const import (
     DEFAULT_ON_GROUP_BLOCK,
     DEFAULT_ON_GROUP_SCENE,
     DOMAIN as HELVAR_DOMAIN,
+    VALID_OFF_GROUP_SCENES,
 )
 
 
@@ -34,24 +35,69 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     # Add devices
     async_add_entities(
-        HelvarLight(group, router) for group in router.api.groups.groups.values()
+        # Add groups
+        HelvarLight(group, None, router)
+        for group in router.api.groups.groups.values()
     )
+
+    devices = [
+        HelvarLight(None, device, router)
+        for device in router.api.devices.get_light_devices()
+    ]
+
+    _LOGGER.critical(f"Adding {len(devices)} devices. ")
+
+    async_add_entities(devices)
 
 
 class HelvarLight(LightEntity):
     """Representation of a Helvar Light."""
 
-    def __init__(self, group: aiohelvar.groups.Group, router):
+    def __init__(
+        self, group: aiohelvar.groups.Group, device: aiohelvar.devices.Device, router
+    ):
         """Initialize an HelvarLight."""
         self._router = router
         self._group = group
-        self.group_id = group.group_id
-        self.is_group = True
+        self._device = device
+        self.group_id = None
+        self.device_address = None
+
+        if group is None:
+            if device is None:
+                raise Exception("device or group must be set")
+            self.is_group = False
+            self.device_address = self._device.address
+        else:
+            self.is_group = True
+            if device is not None:
+                raise Exception("device and group connot both be set")
+
+        self.register_subscription()
+
+    def register_subscription(self):
+        async def async_router_callback_group(group_id):
+            self.async_write_ha_state()
+
+        async def async_router_callback_device(device_id):
+            self.async_write_ha_state()
+
+        if self.is_group:
+            self._router.api.groups.register_subscription(
+                self.group_id, async_router_callback_group
+            )
+        else:
+            self._router.api.devices.register_subscription(
+                self.device_address, async_router_callback_group
+            )
 
     @property
     def name(self):
         """Return the display name of this light."""
-        return self._group.name
+        if self.is_group:
+            return f"Group: {self._group.name}"
+        else:
+            return self._device.name
 
     @property
     def brightness(self):
@@ -62,6 +108,8 @@ class HelvarLight(LightEntity):
         if self.is_group:
             return None
 
+        return self._device.brightness
+
     @property
     def is_on(self):
         """Return true if light is on."""
@@ -70,11 +118,12 @@ class HelvarLight(LightEntity):
             last_scene = self._group.last_scene
             if last_scene is None:
                 return False
-            if last_scene == aiohelvar.parser.address.SceneAddress(
-                self._group.group_id,
-                DEFAULT_OFF_GROUP_BLOCK,
-                DEFAULT_OFF_GROUP_SCENE,
-            ):
+            if last_scene in [
+                aiohelvar.parser.address.SceneAddress(
+                    self._group.group_id, DEFAULT_OFF_GROUP_BLOCK, s
+                )
+                for s in VALID_OFF_GROUP_SCENES
+            ]:
                 return False
             return True
 
@@ -83,6 +132,11 @@ class HelvarLight(LightEntity):
             #     if device is not None:
             #         if device.load_level > 0:
             #             return True
+
+        # Device
+
+        if self.brightness > 0:
+            return True
         return False
 
     async def async_turn_on(self, **kwargs):
@@ -96,6 +150,12 @@ class HelvarLight(LightEntity):
                     self._group.group_id, DEFAULT_ON_GROUP_BLOCK, DEFAULT_ON_GROUP_SCENE
                 )
             )
+        else:
+            # For now, set the device level directly. But we may want to set the device scene as we do with
+            # groups.
+            await self._router.api.devices.set_device_brightness(
+                self.device_address, 255
+            )
 
     async def async_turn_off(self, **kwargs):
         """Instruct the light to turn off."""
@@ -108,6 +168,10 @@ class HelvarLight(LightEntity):
                     DEFAULT_OFF_GROUP_SCENE,
                 )
             )
+        else:
+            # For now, set the device level directly. But we may want to set the device scene as we do with
+            # groups.
+            await self._router.api.devices.set_device_brightness(self.device_address, 0)
 
     async def async_update(self):
         """Fetch new state data for this light.
