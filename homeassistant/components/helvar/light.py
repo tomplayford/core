@@ -1,17 +1,16 @@
+"""Support for Helvar light devices."""
 import logging
 
 import aiohelvar
-import voluptuous as vol
 
 # Import the device class from the component that you want to support
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    PLATFORM_SCHEMA,
-    Light,
+    COLOR_MODE_BRIGHTNESS,
+    COLOR_MODE_ONOFF,
+    SUPPORT_BRIGHTNESS,
     LightEntity,
 )
-
-_LOGGER = logging.getLogger(__name__)
 
 from .const import (
     DEFAULT_OFF_GROUP_BLOCK,
@@ -22,9 +21,11 @@ from .const import (
     VALID_OFF_GROUP_SCENES,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 async def asynnc_setup_platform(hass, config, add_entities, discovery_info=None):
-    """"""
+    """Not currently used."""
     pass
 
 
@@ -71,11 +72,13 @@ class HelvarLight(LightEntity):
         else:
             self.is_group = True
             if device is not None:
-                raise Exception("device and group connot both be set")
+                raise Exception("device and group cannot both be set")
 
         self.register_subscription()
 
     def register_subscription(self):
+        """Register subscription."""
+
         async def async_router_callback_group(group_id):
             self.async_write_ha_state()
 
@@ -102,6 +105,7 @@ class HelvarLight(LightEntity):
     @property
     def brightness(self):
         """Return the brightness of the light.
+
         This method is optional. Removing it indicates to Home Assistant
         that brightness is not supported for this light.
         """
@@ -139,10 +143,29 @@ class HelvarLight(LightEntity):
             return True
         return False
 
+    @property
+    def supported_color_modes(self):
+        """Colour modes."""
+
+        if self.is_group:
+            return [COLOR_MODE_ONOFF]
+
+        return [COLOR_MODE_BRIGHTNESS]
+
+    @property
+    def supported_features(self) -> int:
+        """Supported Features."""
+        if self.is_group:
+            return 0
+        return SUPPORT_BRIGHTNESS
+
     async def async_turn_on(self, **kwargs):
-        """
-        We'll just select scene 1 for a group, for now.
-        """
+        """We'll just select scene 1 for a group, for now."""
+
+        if ATTR_BRIGHTNESS in kwargs:
+            brightness = kwargs[ATTR_BRIGHTNESS]
+        else:
+            brightness = 255
 
         if self.is_group:
             await self._router.api.groups.set_scene(
@@ -153,8 +176,9 @@ class HelvarLight(LightEntity):
         else:
             # For now, set the device level directly. But we may want to set the device scene as we do with
             # groups.
+
             await self._router.api.devices.set_device_brightness(
-                self.device_address, 255
+                self.device_address, brightness
             )
 
     async def async_turn_off(self, **kwargs):
@@ -175,6 +199,7 @@ class HelvarLight(LightEntity):
 
     async def async_update(self):
         """Fetch new state data for this light.
+
         This is the only method that should fetch new data for Home Assistant.
         """
         # the underlying objects are automatically updated, and all properties read directly from
