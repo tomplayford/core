@@ -16,8 +16,7 @@
       "args": [
         "--debug",
         "-c",
-        "config",
-        "--skip-pip"
+        "config"
       ]
 >>>>>>> WIP
     },

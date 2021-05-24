@@ -70,9 +70,10 @@ class HelvarLight(LightEntity):
             self.is_group = False
             self.device_address = self._device.address
         else:
-            self.is_group = True
             if device is not None:
                 raise Exception("device and group cannot both be set")
+            self.is_group = True
+            self.group_id = int(self._group.group_id)
 
         self.register_subscription()
 
@@ -82,16 +83,16 @@ class HelvarLight(LightEntity):
         async def async_router_callback_group(group_id):
             self.async_write_ha_state()
 
-        async def async_router_callback_device(device_id):
+        async def async_router_callback_device(device_address):
             self.async_write_ha_state()
 
         if self.is_group:
             self._router.api.groups.register_subscription(
-                self.group_id, async_router_callback_group
+                int(self.group_id), async_router_callback_group
             )
         else:
             self._router.api.devices.register_subscription(
-                self.device_address, async_router_callback_group
+                self.device_address, async_router_callback_device
             )
 
     @property
