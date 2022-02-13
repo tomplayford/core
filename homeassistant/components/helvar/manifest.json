@@ -7,7 +7,7 @@
   "ssdp": [],
   "zeroconf": [],
   "homekit": {},
-  "dependencies": [],
+  "dependencies": ["voluptuous", "aiohelvar"],
   "codeowners": [
     "@tomplayford"
   ]

@@ -3,19 +3,17 @@ from __future__ import annotations
 
 import asyncio
 
-from homeassistant.components.helvar.router import HelvarRouter
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
+from .router import HelvarRouter
 
-# TODO List the platforms that you want to support.
-# For your initial PR, limit it to 1 platform.
-PLATFORMS = ["light"]
+PLATFORMS = ["light", "select"]
 
 
 async def async_setup(hass, config):
-    """Set up the Hue platform."""
+    """Set up the Helvar platform."""
 
     hass.data[DOMAIN] = {}
     return True
@@ -23,8 +21,6 @@ async def async_setup(hass, config):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up HelvarNet from a config entry."""
-    # TODO Store an API object for your platforms to access
-    # hass.data[DOMAIN][entry.entry_id] = MyApi(...)
 
     router = HelvarRouter(hass, entry)
 

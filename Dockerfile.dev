@@ -3,7 +3,7 @@ FROM mcr.microsoft.com/vscode/devcontainers/python:0-3.9
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN \
-    curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - \
+    curl -ksS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Additional library needed by some tests and accordingly by VScode Tests Discovery
@@ -19,13 +19,16 @@ RUN \
         libpcap-dev \
         libturbojpeg0 \
         git \
+        ca-certificates \
     && apt-get clean \
+    && update-ca-certificates \
+    && apt-get install --reinstall ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src
 
 # Setup hass-release
-RUN git clone --depth 1 https://github.com/home-assistant/hass-release \
+RUN git -c http.sslVerify=false clone --depth 1 https://github.com/home-assistant/hass-release \
     && pip3 install -e hass-release/
 
 WORKDIR /workspaces
@@ -40,3 +43,5 @@ RUN rm -rf requirements.txt requirements_test.txt requirements_test_pre_commit.t
 
 # Set the default shell to bash instead of sh
 ENV SHELL /bin/bash
+
+ENV PYTHONPATH /workspaces/lib/

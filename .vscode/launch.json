@@ -9,16 +9,9 @@
       "type": "python",
       "request": "launch",
       "module": "homeassistant",
-<<<<<<< HEAD
+      "console": "internalConsole",
       "justMyCode": false,
       "args": ["--debug", "-c", "config"]
-=======
-      "args": [
-        "--debug",
-        "-c",
-        "config"
-      ]
->>>>>>> WIP
     },
     {
       // Debug by attaching to local Home Asistant server using Remote Python Debugger.

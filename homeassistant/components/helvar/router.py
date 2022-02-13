@@ -1,3 +1,4 @@
+"""Helvar Router."""
 import logging
 
 import aiohelvar
@@ -15,10 +16,11 @@ class HelvarRouter:
         self.config_entry = config_entry
         self.hass = hass
         self.available = True
+        self.api = None
 
     @property
     def host(self):
-        """Return the host of this bridge."""
+        """Return the host of this router."""
         return self.config_entry.data["host"]
 
     async def async_setup(self, tries=0):
@@ -33,18 +35,21 @@ class HelvarRouter:
             await router.initialize()
 
         except ConnectionError as err:
-            _LOGGER.error("Error connecting to the Hue bridge at %s", host)
+            _LOGGER.error("Error connecting to the Helvar router at %s", host)
             raise ConfigEntryNotReady from err
 
         except Exception:  # pylint: disable=broad-except
-            _LOGGER.exception("Unknown error connecting with Hue bridge at %s", host)
+            _LOGGER.exception("Unknown error connecting with Helvar router at %s", host)
             return False
 
         self.api = router
         # self.sensor_manager = SensorManager(self)
 
         hass.async_create_task(
-            hass.config_entries.async_forward_entry_setup(self.config_entry, "light")
+            hass.config_entries.async_forward_entry_setup(self.config_entry, "light"),
+        )
+        hass.async_create_task(
+            hass.config_entries.async_forward_entry_setup(self.config_entry, "select"),
         )
 
         return True

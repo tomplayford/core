@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN
@@ -34,22 +35,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, hass: HomeAssistant, data: dict[str, Any]
     ) -> dict[str, Any]:
         """Validate the user input allows us to connect.
+
         Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
         """
-        # TODO validate the data can be used to set up a connection.
-
-        # If your PyPI package is not built with async, pass your methods
-        # to the executor:
-        # await hass.async_add_executor_job(
-        #     your_validate_func, data["username"], data["password"]
-        # )
-
         router = aiohelvar.Router((data["host"]), 50000)
 
         try:
             await router.connect()
-        except ConnectionError:
-            raise CannotConnect()
+        except ConnectionError as initial_exception:
+            raise CannotConnect() from initial_exception
 
         workgroup_name = router.workgroup_name
         self.router = router
@@ -58,7 +52,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    ) -> FlowResult:
         """Handle the initial step."""
         if user_input is None:
             return self.async_show_form(
