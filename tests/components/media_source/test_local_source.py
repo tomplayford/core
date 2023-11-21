@@ -1,4 +1,5 @@
 """Test Local Media Source."""
+from collections.abc import AsyncGenerator
 from http import HTTPStatus
 import io
 from pathlib import Path
@@ -7,14 +8,18 @@ from unittest.mock import patch
 
 import pytest
 
-from homeassistant.components import media_source
+from homeassistant.components import media_source, websocket_api
 from homeassistant.components.media_source import const
 from homeassistant.config import async_process_ha_core_config
+from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
+
+from tests.common import MockUser
+from tests.typing import ClientSessionGenerator, WebSocketGenerator
 
 
 @pytest.fixture
-async def temp_dir(hass):
+async def temp_dir(hass: HomeAssistant) -> AsyncGenerator[str, None]:
     """Return a temp dir."""
     with TemporaryDirectory() as tmpdirname:
         target_dir = Path(tmpdirname) / "another_subdir"
@@ -27,7 +32,7 @@ async def temp_dir(hass):
         yield str(target_dir)
 
 
-async def test_async_browse_media(hass):
+async def test_async_browse_media(hass: HomeAssistant) -> None:
     """Test browse media."""
     local_media = hass.config.path("media")
     await async_process_ha_core_config(
@@ -83,7 +88,9 @@ async def test_async_browse_media(hass):
     assert media
 
 
-async def test_media_view(hass, hass_client):
+async def test_media_view(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator
+) -> None:
     """Test media view."""
     local_media = hass.config.path("media")
     await async_process_ha_core_config(
@@ -122,10 +129,19 @@ async def test_media_view(hass, hass_client):
     assert resp.status == HTTPStatus.OK
 
 
-async def test_upload_view(hass, hass_client, temp_dir, hass_admin_user):
+async def test_upload_view(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    temp_dir: str,
+    tmp_path: Path,
+    hass_admin_user: MockUser,
+) -> None:
     """Allow uploading media."""
+    # We need a temp dir that's not under tempdir fixture
+    extra_media_dir = tmp_path
+    hass.config.media_dirs["another_path"] = temp_dir
 
-    img = (Path(__file__).parent.parent / "image/logo.png").read_bytes()
+    img = (Path(__file__).parent.parent / "image_upload/logo.png").read_bytes()
 
     def get_file(name):
         pic = io.BytesIO(img)
@@ -156,6 +172,8 @@ async def test_upload_view(hass, hass_client, temp_dir, hass_admin_user):
         "media-source://media_source/test_dir/..",
         # Domain != media_source
         "media-source://nest/test_dir/.",
+        # Other directory
+        f"media-source://media_source/another_path///{extra_media_dir}/",
         # Completely something else
         "http://bla",
     ):
@@ -167,7 +185,7 @@ async def test_upload_view(hass, hass_client, temp_dir, hass_admin_user):
             },
         )
 
-        assert res.status == 400
+        assert res.status == 400, bad_id
         assert not (Path(temp_dir) / "bad-source-id.png").is_file()
 
     # Test invalid POST data
@@ -224,3 +242,115 @@ async def test_upload_view(hass, hass_client, temp_dir, hass_admin_user):
 
     assert res.status == 401
     assert not (Path(temp_dir) / "no-admin-test.png").is_file()
+
+
+async def test_remove_file(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    temp_dir: str,
+    hass_admin_user: MockUser,
+) -> None:
+    """Allow uploading media."""
+
+    msg_count = 0
+    file_count = 0
+
+    def msgid():
+        nonlocal msg_count
+        msg_count += 1
+        return msg_count
+
+    def create_file():
+        nonlocal file_count
+        file_count += 1
+        to_delete_path = Path(temp_dir) / f"to_delete_{file_count}.txt"
+        to_delete_path.touch()
+        return to_delete_path
+
+    client = await hass_ws_client(hass)
+    to_delete = create_file()
+
+    await client.send_json(
+        {
+            "id": msgid(),
+            "type": "media_source/local_source/remove",
+            "media_content_id": f"media-source://media_source/test_dir/{to_delete.name}",
+        }
+    )
+
+    msg = await client.receive_json()
+
+    assert msg["success"]
+
+    assert not to_delete.exists()
+
+    # Test with bad media source ID
+    extra_id_file = create_file()
+    for bad_id, err in (
+        # Not exists
+        (
+            "media-source://media_source/test_dir/not_exist.txt",
+            websocket_api.ERR_NOT_FOUND,
+        ),
+        # Only a dir
+        ("media-source://media_source/test_dir", websocket_api.ERR_NOT_SUPPORTED),
+        # File with extra identifiers
+        (
+            f"media-source://media_source/test_dir/bla/../{extra_id_file.name}",
+            websocket_api.ERR_INVALID_FORMAT,
+        ),
+        # Location is invalid
+        ("media-source://media_source/test_dir/..", websocket_api.ERR_INVALID_FORMAT),
+        # Domain != media_source
+        ("media-source://nest/test_dir/.", websocket_api.ERR_INVALID_FORMAT),
+        # Completely something else
+        ("http://bla", websocket_api.ERR_INVALID_FORMAT),
+    ):
+        await client.send_json(
+            {
+                "id": msgid(),
+                "type": "media_source/local_source/remove",
+                "media_content_id": bad_id,
+            }
+        )
+
+        msg = await client.receive_json()
+
+        assert not msg["success"]
+        assert msg["error"]["code"] == err
+
+    assert extra_id_file.exists()
+
+    # Test error deleting
+    to_delete_2 = create_file()
+
+    with patch("pathlib.Path.unlink", side_effect=OSError):
+        await client.send_json(
+            {
+                "id": msgid(),
+                "type": "media_source/local_source/remove",
+                "media_content_id": f"media-source://media_source/test_dir/{to_delete_2.name}",
+            }
+        )
+
+        msg = await client.receive_json()
+
+    assert not msg["success"]
+    assert msg["error"]["code"] == websocket_api.ERR_UNKNOWN_ERROR
+
+    # Test requires admin access
+    to_delete_3 = create_file()
+    hass_admin_user.groups = []
+
+    await client.send_json(
+        {
+            "id": msgid(),
+            "type": "media_source/local_source/remove",
+            "media_content_id": f"media-source://media_source/test_dir/{to_delete_3.name}",
+        }
+    )
+
+    msg = await client.receive_json()
+
+    assert not msg["success"]
+    assert to_delete_3.is_file()

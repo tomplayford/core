@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from contextlib import suppress
+from functools import reduce
 import logging
+import operator
 import os
 from pathlib import Path
 import re
@@ -14,7 +17,8 @@ from urllib.parse import urlparse
 
 from awesomeversion import AwesomeVersion
 import voluptuous as vol
-from voluptuous.humanize import humanize_error
+from voluptuous.humanize import MAX_VALIDATION_ERROR_ITEM_LENGTH
+from yaml.error import MarkedYAMLError
 
 from . import auth
 from .auth import mfa_modules as auth_mfa_modules, providers as auth_providers
@@ -26,6 +30,7 @@ from .const import (
     CONF_ALLOWLIST_EXTERNAL_URLS,
     CONF_AUTH_MFA_MODULES,
     CONF_AUTH_PROVIDERS,
+    CONF_COUNTRY,
     CONF_CURRENCY,
     CONF_CUSTOMIZE,
     CONF_CUSTOMIZE_DOMAIN,
@@ -34,6 +39,7 @@ from .const import (
     CONF_EXTERNAL_URL,
     CONF_ID,
     CONF_INTERNAL_URL,
+    CONF_LANGUAGE,
     CONF_LATITUDE,
     CONF_LEGACY_TEMPLATES,
     CONF_LONGITUDE,
@@ -44,24 +50,24 @@ from .const import (
     CONF_TIME_ZONE,
     CONF_TYPE,
     CONF_UNIT_SYSTEM,
-    CONF_UNIT_SYSTEM_IMPERIAL,
     LEGACY_CONF_WHITELIST_EXTERNAL_DIRS,
-    TEMP_CELSIUS,
     __version__,
 )
 from .core import DOMAIN as CONF_CORE, ConfigSource, HomeAssistant, callback
 from .exceptions import HomeAssistantError
+from .generated.currencies import HISTORIC_CURRENCIES
 from .helpers import (
     config_per_platform,
     config_validation as cv,
     extract_domain_configs,
+    issue_registry as ir,
 )
 from .helpers.entity_values import EntityValues
 from .helpers.typing import ConfigType
-from .loader import Integration, IntegrationNotFound
+from .loader import ComponentProtocol, Integration, IntegrationNotFound
 from .requirements import RequirementsNotFound, async_get_integration_with_requirements
 from .util.package import is_docker_env
-from .util.unit_system import IMPERIAL_SYSTEM, METRIC_SYSTEM
+from .util.unit_system import get_unit_system, validate_unit_system
 from .util.yaml import SECRET_YAML, Secrets, load_yaml
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,19 +85,17 @@ SCRIPT_CONFIG_PATH = "scripts.yaml"
 SCENE_CONFIG_PATH = "scenes.yaml"
 
 LOAD_EXCEPTIONS = (ImportError, FileNotFoundError)
-INTEGRATION_LOAD_EXCEPTIONS = (
-    IntegrationNotFound,
-    RequirementsNotFound,
-    *LOAD_EXCEPTIONS,
-)
+INTEGRATION_LOAD_EXCEPTIONS = (IntegrationNotFound, RequirementsNotFound)
+
+SAFE_MODE_FILENAME = "safe-mode"
 
 DEFAULT_CONFIG = f"""
-# Configure a default setup of Home Assistant (frontend, api, etc)
+# Loads default set of integrations. Do not remove.
 default_config:
 
-# Text to speech
-tts:
-  - platform: google_translate
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
 
 automation: !include {AUTOMATION_CONFIG_PATH}
 script: !include {SCRIPT_CONFIG_PATH}
@@ -197,6 +201,50 @@ CUSTOMIZE_CONFIG_SCHEMA = vol.Schema(
     }
 )
 
+
+def _raise_issue_if_historic_currency(hass: HomeAssistant, currency: str) -> None:
+    if currency not in HISTORIC_CURRENCIES:
+        ir.async_delete_issue(hass, "homeassistant", "historic_currency")
+        return
+
+    ir.async_create_issue(
+        hass,
+        "homeassistant",
+        "historic_currency",
+        is_fixable=False,
+        learn_more_url="homeassistant://config/general",
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="historic_currency",
+        translation_placeholders={"currency": currency},
+    )
+
+
+def _raise_issue_if_no_country(hass: HomeAssistant, country: str | None) -> None:
+    if country is not None:
+        ir.async_delete_issue(hass, "homeassistant", "country_not_configured")
+        return
+
+    ir.async_create_issue(
+        hass,
+        "homeassistant",
+        "country_not_configured",
+        is_fixable=False,
+        learn_more_url="homeassistant://config/general",
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="country_not_configured",
+    )
+
+
+def _validate_currency(data: Any) -> Any:
+    try:
+        return cv.currency(data)
+    except vol.InInvalid:
+        with suppress(vol.InInvalid):
+            currency = cv.historic_currency(data)
+            return currency
+        raise
+
+
 CORE_CONFIG_SCHEMA = vol.All(
     CUSTOMIZE_CONFIG_SCHEMA.extend(
         {
@@ -204,16 +252,16 @@ CORE_CONFIG_SCHEMA = vol.All(
             CONF_LATITUDE: cv.latitude,
             CONF_LONGITUDE: cv.longitude,
             CONF_ELEVATION: vol.Coerce(int),
-            vol.Optional(CONF_TEMPERATURE_UNIT): cv.temperature_unit,
-            CONF_UNIT_SYSTEM: cv.unit_system,
+            vol.Remove(CONF_TEMPERATURE_UNIT): cv.temperature_unit,
+            CONF_UNIT_SYSTEM: validate_unit_system,
             CONF_TIME_ZONE: cv.time_zone,
             vol.Optional(CONF_INTERNAL_URL): cv.url,
             vol.Optional(CONF_EXTERNAL_URL): cv.url,
             vol.Optional(CONF_ALLOWLIST_EXTERNAL_DIRS): vol.All(
-                cv.ensure_list, [vol.IsDir()]  # pylint: disable=no-value-for-parameter
+                cv.ensure_list, [vol.IsDir()]
             ),
             vol.Optional(LEGACY_CONF_WHITELIST_EXTERNAL_DIRS): vol.All(
-                cv.ensure_list, [vol.IsDir()]  # pylint: disable=no-value-for-parameter
+                cv.ensure_list, [vol.IsDir()]
             ),
             vol.Optional(CONF_ALLOWLIST_EXTERNAL_URLS): vol.All(
                 cv.ensure_list, [cv.url]
@@ -226,8 +274,10 @@ CORE_CONFIG_SCHEMA = vol.All(
                         {
                             CONF_TYPE: vol.NotIn(
                                 ["insecure_example"],
-                                "The insecure_example auth provider"
-                                " is for testing only.",
+                                (
+                                    "The insecure_example auth provider"
+                                    " is for testing only."
+                                ),
                             )
                         }
                     )
@@ -248,10 +298,11 @@ CORE_CONFIG_SCHEMA = vol.All(
                 ],
                 _no_duplicate_auth_mfa_module,
             ),
-            # pylint: disable=no-value-for-parameter
             vol.Optional(CONF_MEDIA_DIRS): cv.schema_with_slug_keys(vol.IsDir()),
             vol.Optional(CONF_LEGACY_TEMPLATES): cv.boolean,
-            vol.Optional(CONF_CURRENCY): cv.currency,
+            vol.Optional(CONF_CURRENCY): _validate_currency,
+            vol.Optional(CONF_COUNTRY): cv.country,
+            vol.Optional(CONF_LANGUAGE): cv.language,
         }
     ),
     _filter_bad_internal_external_urls,
@@ -275,7 +326,7 @@ async def async_ensure_config_exists(hass: HomeAssistant) -> bool:
     if os.path.isfile(config_path):
         return True
 
-    print(
+    print(  # noqa: T201
         "Unable to find configuration. Creating default one in", hass.config.config_dir
     )
     return await async_create_default_config(hass)
@@ -303,53 +354,64 @@ def _write_default_config(config_dir: str) -> bool:
     # Writing files with YAML does not create the most human readable results
     # So we're hard coding a YAML template.
     try:
-        with open(config_path, "wt", encoding="utf8") as config_file:
+        with open(config_path, "w", encoding="utf8") as config_file:
             config_file.write(DEFAULT_CONFIG)
 
         if not os.path.isfile(secret_path):
-            with open(secret_path, "wt", encoding="utf8") as secret_file:
+            with open(secret_path, "w", encoding="utf8") as secret_file:
                 secret_file.write(DEFAULT_SECRETS)
 
-        with open(version_path, "wt", encoding="utf8") as version_file:
+        with open(version_path, "w", encoding="utf8") as version_file:
             version_file.write(__version__)
 
         if not os.path.isfile(automation_yaml_path):
-            with open(automation_yaml_path, "wt", encoding="utf8") as automation_file:
+            with open(automation_yaml_path, "w", encoding="utf8") as automation_file:
                 automation_file.write("[]")
 
         if not os.path.isfile(script_yaml_path):
-            with open(script_yaml_path, "wt", encoding="utf8"):
+            with open(script_yaml_path, "w", encoding="utf8"):
                 pass
 
         if not os.path.isfile(scene_yaml_path):
-            with open(scene_yaml_path, "wt", encoding="utf8"):
+            with open(scene_yaml_path, "w", encoding="utf8"):
                 pass
 
         return True
 
     except OSError:
-        print("Unable to create default configuration file", config_path)
+        print(  # noqa: T201
+            f"Unable to create default configuration file {config_path}"
+        )
         return False
 
 
 async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
     """Load YAML from a Home Assistant configuration file.
 
-    This function allow a component inside the asyncio loop to reload its
+    This function allows a component inside the asyncio loop to reload its
     configuration by itself. Include package merge.
     """
-    if hass.config.config_dir is None:
-        secrets = None
-    else:
-        secrets = Secrets(Path(hass.config.config_dir))
+    secrets = Secrets(Path(hass.config.config_dir))
 
     # Not using async_add_executor_job because this is an internal method.
-    config = await hass.loop.run_in_executor(
-        None,
-        load_yaml_config_file,
-        hass.config.path(YAML_CONFIG_FILE),
-        secrets,
-    )
+    try:
+        config = await hass.loop.run_in_executor(
+            None,
+            load_yaml_config_file,
+            hass.config.path(YAML_CONFIG_FILE),
+            secrets,
+        )
+    except HomeAssistantError as ex:
+        if not (base_ex := ex.__cause__) or not isinstance(base_ex, MarkedYAMLError):
+            raise
+
+        # Rewrite path to offending YAML file to be relative the hass config dir
+        if base_ex.context_mark and base_ex.context_mark.name:
+            base_ex.context_mark.name = _relpath(hass, base_ex.context_mark.name)
+        if base_ex.problem_mark and base_ex.problem_mark.name:
+            base_ex.problem_mark.name = _relpath(hass, base_ex.problem_mark.name)
+        raise
+
     core_config = config.get(CONF_CORE, {})
     await merge_packages_config(hass, config, core_config.get(CONF_PACKAGES, {}))
     return config
@@ -420,7 +482,7 @@ def process_ha_config_upgrade(hass: HomeAssistant) -> None:
             _LOGGER.info("Migrating google tts to google_translate tts")
             config_raw = config_raw.replace(TTS_PRE_92, TTS_92)
             try:
-                with open(config_path, "wt", encoding="utf-8") as config_file:
+                with open(config_path, "w", encoding="utf-8") as config_file:
                     config_file.write(config_raw)
             except OSError:
                 _LOGGER.exception("Migrating to google_translate tts failed")
@@ -432,65 +494,231 @@ def process_ha_config_upgrade(hass: HomeAssistant) -> None:
         if os.path.isdir(lib_path):
             shutil.rmtree(lib_path)
 
-    with open(version_path, "wt", encoding="utf8") as outp:
+    with open(version_path, "w", encoding="utf8") as outp:
         outp.write(__version__)
 
 
 @callback
-def async_log_exception(
-    ex: Exception,
+def async_log_schema_error(
+    ex: vol.Invalid,
     domain: str,
     config: dict,
     hass: HomeAssistant,
     link: str | None = None,
 ) -> None:
-    """Log an error for configuration validation.
-
-    This method must be run in the event loop.
-    """
+    """Log a schema validation error."""
     if hass is not None:
         async_notify_setup_error(hass, domain, link)
-    message, is_friendly = _format_config_error(ex, domain, config, link)
-    _LOGGER.error(message, exc_info=not is_friendly and ex)
+    message = format_schema_error(hass, ex, domain, config, link)
+    _LOGGER.error(message)
 
 
 @callback
-def _format_config_error(
-    ex: Exception, domain: str, config: dict, link: str | None = None
-) -> tuple[str, bool]:
-    """Generate log exception for configuration validation.
-
-    This method must be run in the event loop.
-    """
-    is_friendly = False
-    message = f"Invalid config for [{domain}]: "
+def async_log_config_validator_error(
+    ex: vol.Invalid | HomeAssistantError,
+    domain: str,
+    config: dict,
+    hass: HomeAssistant,
+    link: str | None = None,
+) -> None:
+    """Log an error from a custom config validator."""
     if isinstance(ex, vol.Invalid):
-        if "extra keys not allowed" in ex.error_message:
-            path = "->".join(str(m) for m in ex.path)
-            message += (
-                f"[{ex.path[-1]}] is an invalid option for [{domain}]. "
-                f"Check: {domain}->{path}."
-            )
-        else:
-            message += f"{humanize_error(config, ex)}."
-        is_friendly = True
-    else:
-        message += str(ex) or repr(ex)
+        async_log_schema_error(ex, domain, config, hass, link)
+        return
 
+    if hass is not None:
+        async_notify_setup_error(hass, domain, link)
+    message = format_homeassistant_error(hass, ex, domain, config, link)
+    _LOGGER.error(message, exc_info=ex)
+
+
+def _get_annotation(item: Any) -> tuple[str, int | str] | None:
+    if not hasattr(item, "__config_file__"):
+        return None
+
+    return (getattr(item, "__config_file__"), getattr(item, "__line__", "?"))
+
+
+def _get_by_path(data: dict | list, items: list[str | int]) -> Any:
+    """Access a nested object in root by item sequence.
+
+    Returns None in case of error.
+    """
     try:
-        domain_config = config.get(domain, config)
-    except AttributeError:
-        domain_config = config
+        return reduce(operator.getitem, items, data)  # type: ignore[arg-type]
+    except (KeyError, IndexError, TypeError):
+        return None
 
-    message += (
-        f" (See {getattr(domain_config, '__config_file__', '?')}, "
-        f"line {getattr(domain_config, '__line__', '?')}). "
+
+def find_annotation(
+    config: dict | list, path: list[str | int]
+) -> tuple[str, int | str] | None:
+    """Find file/line annotation for a node in config pointed to by path.
+
+    If the node pointed to is a dict or list, prefer the annotation for the key in
+    the key/value pair defining the dict or list.
+    If the node is not annotated, try the parent node.
+    """
+
+    def find_annotation_for_key(
+        item: dict, path: list[str | int], tail: str | int
+    ) -> tuple[str, int | str] | None:
+        for key in item:
+            if key == tail:
+                if annotation := _get_annotation(key):
+                    return annotation
+                break
+        return None
+
+    def find_annotation_rec(
+        config: dict | list, path: list[str | int], tail: str | int | None
+    ) -> tuple[str, int | str] | None:
+        item = _get_by_path(config, path)
+        if isinstance(item, dict) and tail is not None:
+            if tail_annotation := find_annotation_for_key(item, path, tail):
+                return tail_annotation
+
+        if (
+            isinstance(item, (dict, list))
+            and path
+            and (
+                key_annotation := find_annotation_for_key(
+                    _get_by_path(config, path[:-1]), path[:-1], path[-1]
+                )
+            )
+        ):
+            return key_annotation
+
+        if annotation := _get_annotation(item):
+            return annotation
+
+        if not path:
+            return None
+
+        tail = path.pop()
+        if annotation := find_annotation_rec(config, path, tail):
+            return annotation
+        return _get_annotation(item)
+
+    return find_annotation_rec(config, list(path), None)
+
+
+def _relpath(hass: HomeAssistant, path: str) -> str:
+    """Return path relative to the Home Assistant config dir."""
+    return os.path.relpath(path, hass.config.config_dir)
+
+
+def stringify_invalid(
+    hass: HomeAssistant,
+    ex: vol.Invalid,
+    domain: str,
+    config: dict,
+    link: str | None,
+    max_sub_error_length: int,
+) -> str:
+    """Stringify voluptuous.Invalid.
+
+    This is an alternative to the custom __str__ implemented in
+    voluptuous.error.Invalid. The modifications are:
+    - Format the path delimited by -> instead of @data[]
+    - Prefix with domain, file and line of the error
+    - Suffix with a link to the documentation
+    - Give a more user friendly output for unknown options
+    - Give a more user friendly output for missing options
+    """
+    message_prefix = f"Invalid config for '{domain}'"
+    if domain != CONF_CORE and link:
+        message_suffix = f", please check the docs at {link}"
+    else:
+        message_suffix = ""
+    if annotation := find_annotation(config, ex.path):
+        message_prefix += f" at {_relpath(hass, annotation[0])}, line {annotation[1]}"
+    path = "->".join(str(m) for m in ex.path)
+    if ex.error_message == "extra keys not allowed":
+        return (
+            f"{message_prefix}: '{ex.path[-1]}' is an invalid option for '{domain}', "
+            f"check: {path}{message_suffix}"
+        )
+    if ex.error_message == "required key not provided":
+        return (
+            f"{message_prefix}: required key '{ex.path[-1]}' not provided"
+            f"{message_suffix}"
+        )
+    # This function is an alternative to the stringification done by
+    # vol.Invalid.__str__, so we need to call Exception.__str__ here
+    # instead of str(ex)
+    output = Exception.__str__(ex)
+    if error_type := ex.error_type:
+        output += " for " + error_type
+    offending_item_summary = repr(_get_by_path(config, ex.path))
+    if len(offending_item_summary) > max_sub_error_length:
+        offending_item_summary = (
+            f"{offending_item_summary[: max_sub_error_length - 3]}..."
+        )
+    return (
+        f"{message_prefix}: {output} '{path}', got {offending_item_summary}"
+        f"{message_suffix}"
     )
 
-    if domain != CONF_CORE and link:
-        message += f"Please check the docs at {link}"
 
-    return message, is_friendly
+def humanize_error(
+    hass: HomeAssistant,
+    validation_error: vol.Invalid,
+    domain: str,
+    config: dict,
+    link: str | None,
+    max_sub_error_length: int = MAX_VALIDATION_ERROR_ITEM_LENGTH,
+) -> str:
+    """Provide a more helpful + complete validation error message.
+
+    This is a modified version of voluptuous.error.Invalid.__str__,
+    the modifications make some minor changes to the formatting.
+    """
+    if isinstance(validation_error, vol.MultipleInvalid):
+        return "\n".join(
+            sorted(
+                humanize_error(
+                    hass, sub_error, domain, config, link, max_sub_error_length
+                )
+                for sub_error in validation_error.errors
+            )
+        )
+    return stringify_invalid(
+        hass, validation_error, domain, config, link, max_sub_error_length
+    )
+
+
+@callback
+def format_homeassistant_error(
+    hass: HomeAssistant,
+    ex: HomeAssistantError,
+    domain: str,
+    config: dict,
+    link: str | None = None,
+) -> str:
+    """Format HomeAssistantError thrown by a custom config validator."""
+    message_prefix = f"Invalid config for '{domain}'"
+    # HomeAssistantError raised by custom config validator has no path to the
+    # offending configuration key, use the domain key as path instead.
+    if annotation := find_annotation(config, [domain]):
+        message_prefix += f" at {_relpath(hass, annotation[0])}, line {annotation[1]}"
+    message = f"{message_prefix}: {str(ex) or repr(ex)}"
+    if domain != CONF_CORE and link:
+        message += f", please check the docs at {link}"
+
+    return message
+
+
+@callback
+def format_schema_error(
+    hass: HomeAssistant,
+    ex: vol.Invalid,
+    domain: str,
+    config: dict,
+    link: str | None = None,
+) -> str:
+    """Format configuration validation error."""
+    return humanize_error(hass, ex, domain, config, link)
 
 
 async def async_process_ha_core_config(hass: HomeAssistant, config: dict) -> None:
@@ -530,6 +758,8 @@ async def async_process_ha_core_config(hass: HomeAssistant, config: dict) -> Non
             CONF_EXTERNAL_URL,
             CONF_INTERNAL_URL,
             CONF_CURRENCY,
+            CONF_COUNTRY,
+            CONF_LANGUAGE,
         )
     ):
         hac.config_source = ConfigSource.YAML
@@ -544,9 +774,14 @@ async def async_process_ha_core_config(hass: HomeAssistant, config: dict) -> Non
         (CONF_MEDIA_DIRS, "media_dirs"),
         (CONF_LEGACY_TEMPLATES, "legacy_templates"),
         (CONF_CURRENCY, "currency"),
+        (CONF_COUNTRY, "country"),
+        (CONF_LANGUAGE, "language"),
     ):
         if key in config:
             setattr(hac, attr, config[key])
+
+    _raise_issue_if_historic_currency(hass, hass.config.currency)
+    _raise_issue_if_no_country(hass, hass.config.country)
 
     if CONF_TIME_ZONE in config:
         hac.set_time_zone(config[CONF_TIME_ZONE])
@@ -602,38 +837,21 @@ async def async_process_ha_core_config(hass: HomeAssistant, config: dict) -> Non
     hass.data[DATA_CUSTOMIZE] = EntityValues(cust_exact, cust_domain, cust_glob)
 
     if CONF_UNIT_SYSTEM in config:
-        if config[CONF_UNIT_SYSTEM] == CONF_UNIT_SYSTEM_IMPERIAL:
-            hac.units = IMPERIAL_SYSTEM
-        else:
-            hac.units = METRIC_SYSTEM
-    elif CONF_TEMPERATURE_UNIT in config:
-        unit = config[CONF_TEMPERATURE_UNIT]
-        hac.units = METRIC_SYSTEM if unit == TEMP_CELSIUS else IMPERIAL_SYSTEM
-        _LOGGER.warning(
-            "Found deprecated temperature unit in core "
-            "configuration expected unit system. Replace '%s: %s' "
-            "with '%s: %s'",
-            CONF_TEMPERATURE_UNIT,
-            unit,
-            CONF_UNIT_SYSTEM,
-            hac.units.name,
-        )
+        hac.units = get_unit_system(config[CONF_UNIT_SYSTEM])
 
 
-def _log_pkg_error(package: str, component: str, config: dict, message: str) -> None:
+def _log_pkg_error(
+    hass: HomeAssistant, package: str, component: str, config: dict, message: str
+) -> None:
     """Log an error while merging packages."""
-    message = f"Package {package} setup failed. Integration {component} {message}"
+    message_prefix = f"Setup of package '{package}'"
+    if annotation := find_annotation(config, [CONF_CORE, CONF_PACKAGES, package]):
+        message_prefix += f" at {_relpath(hass, annotation[0])}, line {annotation[1]}"
 
-    pack_config = config[CONF_CORE][CONF_PACKAGES].get(package, config)
-    message += (
-        f" (See {getattr(pack_config, '__config_file__', '?')}:"
-        f"{getattr(pack_config, '__line__', '?')}). "
-    )
-
-    _LOGGER.error(message)
+    _LOGGER.error("%s failed: %s", message_prefix, message)
 
 
-def _identify_config_schema(module: ModuleType) -> str | None:
+def _identify_config_schema(module: ComponentProtocol) -> str | None:
     """Extract the schema and identify list or dict based."""
     if not isinstance(module.CONFIG_SCHEMA, vol.Schema):
         return None
@@ -681,15 +899,15 @@ def _identify_config_schema(module: ModuleType) -> str | None:
     return None
 
 
-def _recursive_merge(conf: dict[str, Any], package: dict[str, Any]) -> bool | str:
+def _recursive_merge(conf: dict[str, Any], package: dict[str, Any]) -> str | None:
     """Merge package into conf, recursively."""
-    error: bool | str = False
+    duplicate_key: str | None = None
     for key, pack_conf in package.items():
         if isinstance(pack_conf, dict):
             if not pack_conf:
                 continue
             conf[key] = conf.get(key, OrderedDict())
-            error = _recursive_merge(conf=conf[key], package=pack_conf)
+            duplicate_key = _recursive_merge(conf=conf[key], package=pack_conf)
 
         elif isinstance(pack_conf, list):
             conf[key] = cv.remove_falsy(
@@ -700,14 +918,16 @@ def _recursive_merge(conf: dict[str, Any], package: dict[str, Any]) -> bool | st
             if conf.get(key) is not None:
                 return key
             conf[key] = pack_conf
-    return error
+    return duplicate_key
 
 
 async def merge_packages_config(
     hass: HomeAssistant,
     config: dict,
     packages: dict[str, Any],
-    _log_pkg_error: Callable = _log_pkg_error,
+    _log_pkg_error: Callable[
+        [HomeAssistant, str, str, dict, str], None
+    ] = _log_pkg_error,
 ) -> dict:
     """Merge packages into the top-level configuration. Mutate config."""
     PACKAGES_CONFIG_SCHEMA(packages)
@@ -717,15 +937,24 @@ async def merge_packages_config(
                 continue
             # If component name is given with a trailing description, remove it
             # when looking for component
-            domain = comp_name.split(" ")[0]
+            domain = comp_name.partition(" ")[0]
 
             try:
                 integration = await async_get_integration_with_requirements(
                     hass, domain
                 )
                 component = integration.get_component()
+            except LOAD_EXCEPTIONS as ex:
+                _log_pkg_error(
+                    hass,
+                    pack_name,
+                    comp_name,
+                    config,
+                    f"Integration {comp_name} caused error: {str(ex)}",
+                )
+                continue
             except INTEGRATION_LOAD_EXCEPTIONS as ex:
-                _log_pkg_error(pack_name, comp_name, config, str(ex))
+                _log_pkg_error(hass, pack_name, comp_name, config, str(ex))
                 continue
 
             try:
@@ -759,7 +988,11 @@ async def merge_packages_config(
 
             if not isinstance(comp_conf, dict):
                 _log_pkg_error(
-                    pack_name, comp_name, config, "cannot be merged. Expected a dict."
+                    hass,
+                    pack_name,
+                    comp_name,
+                    config,
+                    f"integration '{comp_name}' cannot be merged, expected a dict",
                 )
                 continue
 
@@ -768,17 +1001,25 @@ async def merge_packages_config(
 
             if not isinstance(config[comp_name], dict):
                 _log_pkg_error(
+                    hass,
                     pack_name,
                     comp_name,
                     config,
-                    "cannot be merged. Dict expected in main config.",
+                    (
+                        f"integration '{comp_name}' cannot be merged, dict expected in "
+                        "main config"
+                    ),
                 )
                 continue
 
-            error = _recursive_merge(conf=config[comp_name], package=comp_conf)
-            if error:
+            duplicate_key = _recursive_merge(conf=config[comp_name], package=comp_conf)
+            if duplicate_key:
                 _log_pkg_error(
-                    pack_name, comp_name, config, f"has duplicate key '{error}'"
+                    hass,
+                    pack_name,
+                    comp_name,
+                    config,
+                    f"integration '{comp_name}' has duplicate key '{duplicate_key}'",
                 )
 
     return config
@@ -816,11 +1057,13 @@ async def async_process_component_config(  # noqa: C901
         config_validator, "async_validate_config"
     ):
         try:
-            return await config_validator.async_validate_config(  # type: ignore
-                hass, config
+            return (  # type: ignore[no-any-return]
+                await config_validator.async_validate_config(hass, config)
             )
         except (vol.Invalid, HomeAssistantError) as ex:
-            async_log_exception(ex, domain, config, hass, integration.documentation)
+            async_log_config_validator_error(
+                ex, domain, config, hass, integration.documentation
+            )
             return None
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception("Unknown error calling %s config validator", domain)
@@ -829,9 +1072,9 @@ async def async_process_component_config(  # noqa: C901
     # No custom config validator, proceed with schema validation
     if hasattr(component, "CONFIG_SCHEMA"):
         try:
-            return component.CONFIG_SCHEMA(config)  # type: ignore
+            return component.CONFIG_SCHEMA(config)  # type: ignore[no-any-return]
         except vol.Invalid as ex:
-            async_log_exception(ex, domain, config, hass, integration.documentation)
+            async_log_schema_error(ex, domain, config, hass, integration.documentation)
             return None
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception("Unknown error calling %s CONFIG_SCHEMA", domain)
@@ -850,11 +1093,16 @@ async def async_process_component_config(  # noqa: C901
         try:
             p_validated = component_platform_schema(p_config)
         except vol.Invalid as ex:
-            async_log_exception(ex, domain, p_config, hass, integration.documentation)
+            async_log_schema_error(
+                ex, domain, p_config, hass, integration.documentation
+            )
             continue
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception(
-                "Unknown error validating %s platform config with %s component platform schema",
+                (
+                    "Unknown error validating %s platform config with %s component"
+                    " platform schema"
+                ),
                 p_name,
                 domain,
             )
@@ -884,7 +1132,7 @@ async def async_process_component_config(  # noqa: C901
             try:
                 p_validated = platform.PLATFORM_SCHEMA(p_config)
             except vol.Invalid as ex:
-                async_log_exception(
+                async_log_schema_error(
                     ex,
                     f"{domain}.{p_name}",
                     p_config,
@@ -894,7 +1142,10 @@ async def async_process_component_config(  # noqa: C901
                 continue
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception(
-                    "Unknown error validating config for %s platform for %s component with PLATFORM_SCHEMA",
+                    (
+                        "Unknown error validating config for %s platform for %s"
+                        " component with PLATFORM_SCHEMA"
+                    ),
                     p_name,
                     domain,
                 )
@@ -922,7 +1173,7 @@ async def async_check_ha_config_file(hass: HomeAssistant) -> str | None:
 
     This method is a coroutine.
     """
-    # pylint: disable=import-outside-toplevel
+    # pylint: disable-next=import-outside-toplevel
     from .helpers import check_config
 
     res = await check_config.async_check_ha_config_file(hass)
@@ -940,7 +1191,7 @@ def async_notify_setup_error(
 
     This method must be run in the event loop.
     """
-    # pylint: disable=import-outside-toplevel
+    # pylint: disable-next=import-outside-toplevel
     from .components import persistent_notification
 
     if (errors := hass.data.get(DATA_PERSISTENT_ERRORS)) is None:
@@ -951,11 +1202,33 @@ def async_notify_setup_error(
     message = "The following integrations and platforms could not be set up:\n\n"
 
     for name, link in errors.items():
+        show_logs = f"[Show logs](/config/logs?filter={name})"
         part = f"[{name}]({link})" if link else name
-        message += f" - {part}\n"
+        message += f" - {part} ({show_logs})\n"
 
     message += "\nPlease check your config and [logs](/config/logs)."
 
     persistent_notification.async_create(
         hass, message, "Invalid config", "invalid_config"
     )
+
+
+def safe_mode_enabled(config_dir: str) -> bool:
+    """Return if safe mode is enabled.
+
+    If safe mode is enabled, the safe mode file will be removed.
+    """
+    safe_mode_path = os.path.join(config_dir, SAFE_MODE_FILENAME)
+    safe_mode = os.path.exists(safe_mode_path)
+    if safe_mode:
+        os.remove(safe_mode_path)
+    return safe_mode
+
+
+async def async_enable_safe_mode(hass: HomeAssistant) -> None:
+    """Enable safe mode."""
+
+    def _enable_safe_mode() -> None:
+        Path(hass.config.path(SAFE_MODE_FILENAME)).touch()
+
+    await hass.async_add_executor_job(_enable_safe_mode)

@@ -9,13 +9,14 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import SONOS_CREATE_BATTERY, SONOS_CREATE_MIC_SENSOR
 from .entity import SonosEntity
+from .helpers import soco_error
 from .speaker import SonosSpeaker
 
 ATTR_BATTERY_POWER_SOURCE = "power_source"
@@ -62,7 +63,6 @@ class SonosPowerEntity(SonosEntity, BinarySensorEntity):
         """Initialize the power entity binary sensor."""
         super().__init__(speaker)
         self._attr_unique_id = f"{self.soco.uid}-power"
-        self._attr_name = f"{self.speaker.zone_name} Power"
 
     async def _async_fallback_poll(self) -> None:
         """Poll the device for the current state."""
@@ -91,17 +91,23 @@ class SonosMicrophoneSensorEntity(SonosEntity, BinarySensorEntity):
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:microphone"
+    _attr_translation_key = "microphone"
 
     def __init__(self, speaker: SonosSpeaker) -> None:
         """Initialize the microphone binary sensor entity."""
         super().__init__(speaker)
         self._attr_unique_id = f"{self.soco.uid}-microphone"
-        self._attr_name = f"{self.speaker.zone_name} Microphone"
 
     async def _async_fallback_poll(self) -> None:
-        """Stub for abstract class implementation. Not a pollable attribute."""
+        """Handle polling when subscription fails."""
+        await self.hass.async_add_executor_job(self.poll_state)
+
+    @soco_error()
+    def poll_state(self) -> None:
+        """Poll the current state of the microphone."""
+        self.speaker.mic_enabled = self.soco.mic_enabled
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
         """Return the state of the binary sensor."""
         return self.speaker.mic_enabled

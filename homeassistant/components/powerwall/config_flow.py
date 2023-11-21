@@ -1,6 +1,7 @@
 """Config flow for Tesla Powerwall integration."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -9,6 +10,7 @@ from tesla_powerwall import (
     MissingAttributeError,
     Powerwall,
     PowerwallUnreachableError,
+    SiteInfo,
 )
 import voluptuous as vol
 
@@ -18,17 +20,36 @@ from homeassistant.const import CONF_IP_ADDRESS, CONF_PASSWORD
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.util.network import is_ip_address
 
+from . import async_last_update_was_successful
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _login_and_fetch_site_info(power_wall: Powerwall, password: str):
+ENTRY_FAILURE_STATES = {
+    config_entries.ConfigEntryState.SETUP_ERROR,
+    config_entries.ConfigEntryState.SETUP_RETRY,
+}
+
+
+def _login_and_fetch_site_info(
+    power_wall: Powerwall, password: str
+) -> tuple[SiteInfo, str]:
     """Login to the powerwall and fetch the base info."""
     if password is not None:
         power_wall.login(password)
-    power_wall.detect_and_pin_version()
     return power_wall.get_site_info(), power_wall.get_gateway_din()
+
+
+def _powerwall_is_reachable(ip_address: str, password: str) -> bool:
+    """Check if the powerwall is reachable."""
+    try:
+        Powerwall(ip_address).login(password)
+    except AccessDeniedError:
+        return True
+    except PowerwallUnreachableError:
+        return False
+    return True
 
 
 async def validate_input(
@@ -60,11 +81,30 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the powerwall flow."""
         self.ip_address: str | None = None
         self.title: str | None = None
         self.reauth_entry: config_entries.ConfigEntry | None = None
+
+    async def _async_powerwall_is_offline(
+        self, entry: config_entries.ConfigEntry
+    ) -> bool:
+        """Check if the power wall is offline.
+
+        We define offline by the config entry
+        is in a failure/retry state or the updates
+        are failing and the powerwall is unreachable
+        since device may be updating.
+        """
+        ip_address = entry.data[CONF_IP_ADDRESS]
+        password = entry.data[CONF_PASSWORD]
+        return bool(
+            entry.state in ENTRY_FAILURE_STATES
+            or not async_last_update_was_successful(self.hass, entry)
+        ) and not await self.hass.async_add_executor_job(
+            _powerwall_is_reachable, ip_address, password
+        )
 
     async def async_step_dhcp(self, discovery_info: dhcp.DhcpServiceInfo) -> FlowResult:
         """Handle dhcp discovery."""
@@ -72,7 +112,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         gateway_din = discovery_info.hostname.upper()
         # The hostname is the gateway_din (unique_id)
         await self.async_set_unique_id(gateway_din)
-        self._abort_if_unique_id_configured(updates={CONF_IP_ADDRESS: self.ip_address})
         for entry in self._async_current_entries(include_ignore=False):
             if entry.data[CONF_IP_ADDRESS] == discovery_info.ip:
                 if entry.unique_id is not None and is_ip_address(entry.unique_id):
@@ -83,6 +122,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             self.hass.config_entries.async_reload(entry.entry_id)
                         )
                 return self.async_abort(reason="already_configured")
+            if entry.unique_id == gateway_din:
+                if await self._async_powerwall_is_offline(entry):
+                    if self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, CONF_IP_ADDRESS: self.ip_address}
+                    ):
+                        self.hass.async_create_task(
+                            self.hass.config_entries.async_reload(entry.entry_id)
+                        )
+                return self.async_abort(reason="already_configured")
+        # Still need to abort for ignored entries
+        self._abort_if_unique_id_configured()
         self.context["title_placeholders"] = {
             "name": gateway_din,
             "ip_address": self.ip_address,
@@ -101,7 +151,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_confirm_discovery()
 
     async def _async_try_connect(
-        self, user_input
+        self, user_input: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
         """Try to connect to the powerwall."""
         info = None
@@ -120,7 +170,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return errors, info
 
-    async def async_step_confirm_discovery(self, user_input=None) -> FlowResult:
+    async def async_step_confirm_discovery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Confirm a discovered powerwall."""
         assert self.ip_address is not None
         assert self.unique_id is not None
@@ -141,16 +193,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         return self.async_show_form(
             step_id="confirm_discovery",
-            data_schema=vol.Schema({}),
             description_placeholders={
                 "name": self.title,
                 "ip_address": self.ip_address,
             },
         )
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Handle the initial step."""
-        errors = {}
+        errors: dict[str, str] | None = {}
         if user_input is not None:
             errors, info = await self._async_try_connect(user_input)
             if not errors:
@@ -176,9 +229,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_reauth_confirm(self, user_input=None):
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Handle reauth confirmation."""
-        errors = {}
+        assert self.reauth_entry is not None
+        errors: dict[str, str] | None = {}
         if user_input is not None:
             entry_data = self.reauth_entry.data
             errors, _ = await self._async_try_connect(
@@ -197,7 +253,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_reauth(self, data):
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
         """Handle configuration by re-auth."""
         self.reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
@@ -206,4 +262,4 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class WrongVersion(exceptions.HomeAssistantError):
-    """Error to indicate the powerwall uses a software version we cannot interact with."""
+    """Error indicating we cannot interact with the powerwall software version."""

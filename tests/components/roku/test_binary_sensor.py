@@ -2,16 +2,22 @@
 from unittest.mock import MagicMock
 
 import pytest
+from rokuecp import Device as RokuDevice
 
 from homeassistant.components.binary_sensor import STATE_OFF, STATE_ON
 from homeassistant.components.roku.const import DOMAIN
-from homeassistant.const import ATTR_DEVICE_CLASS, ATTR_FRIENDLY_NAME, ATTR_ICON
+from homeassistant.const import (
+    ATTR_DEVICE_CLASS,
+    ATTR_FRIENDLY_NAME,
+    ATTR_ICON,
+    EntityCategory,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
-from homeassistant.helpers.entity import EntityCategory
+
+from . import UPNP_SERIAL
 
 from tests.common import MockConfigEntry
-from tests.components.roku import UPNP_SERIAL
 
 
 async def test_roku_binary_sensors(
@@ -28,7 +34,7 @@ async def test_roku_binary_sensors(
     assert entry.unique_id == f"{UPNP_SERIAL}_headphones_connected"
     assert entry.entity_category is None
     assert state.state == STATE_OFF
-    assert state.attributes.get(ATTR_FRIENDLY_NAME) == "My Roku 3 Headphones Connected"
+    assert state.attributes.get(ATTR_FRIENDLY_NAME) == "My Roku 3 Headphones connected"
     assert state.attributes.get(ATTR_ICON) == "mdi:headphones"
     assert ATTR_DEVICE_CLASS not in state.attributes
 
@@ -50,7 +56,7 @@ async def test_roku_binary_sensors(
     assert entry.unique_id == f"{UPNP_SERIAL}_supports_ethernet"
     assert entry.entity_category == EntityCategory.DIAGNOSTIC
     assert state.state == STATE_ON
-    assert state.attributes.get(ATTR_FRIENDLY_NAME) == "My Roku 3 Supports Ethernet"
+    assert state.attributes.get(ATTR_FRIENDLY_NAME) == "My Roku 3 Supports ethernet"
     assert state.attributes.get(ATTR_ICON) == "mdi:ethernet"
     assert ATTR_DEVICE_CLASS not in state.attributes
 
@@ -61,7 +67,7 @@ async def test_roku_binary_sensors(
     assert entry.unique_id == f"{UPNP_SERIAL}_supports_find_remote"
     assert entry.entity_category == EntityCategory.DIAGNOSTIC
     assert state.state == STATE_OFF
-    assert state.attributes.get(ATTR_FRIENDLY_NAME) == "My Roku 3 Supports Find Remote"
+    assert state.attributes.get(ATTR_FRIENDLY_NAME) == "My Roku 3 Supports find remote"
     assert state.attributes.get(ATTR_ICON) == "mdi:remote"
     assert ATTR_DEVICE_CLASS not in state.attributes
 
@@ -82,10 +88,11 @@ async def test_roku_binary_sensors(
     assert device_entry.suggested_area is None
 
 
-@pytest.mark.parametrize("mock_roku", ["roku/rokutv-7820x.json"], indirect=True)
+@pytest.mark.parametrize("mock_device", ["roku/rokutv-7820x.json"], indirect=True)
 async def test_rokutv_binary_sensors(
     hass: HomeAssistant,
     init_integration: MockConfigEntry,
+    mock_device: RokuDevice,
     mock_roku: MagicMock,
 ) -> None:
     """Test the Roku binary sensors."""
@@ -103,7 +110,7 @@ async def test_rokutv_binary_sensors(
     assert state.state == STATE_OFF
     assert (
         state.attributes.get(ATTR_FRIENDLY_NAME)
-        == '58" Onn Roku TV Headphones Connected'
+        == '58" Onn Roku TV Headphones connected'
     )
     assert state.attributes.get(ATTR_ICON) == "mdi:headphones"
     assert ATTR_DEVICE_CLASS not in state.attributes
@@ -129,7 +136,7 @@ async def test_rokutv_binary_sensors(
     assert entry.entity_category == EntityCategory.DIAGNOSTIC
     assert state.state == STATE_ON
     assert (
-        state.attributes.get(ATTR_FRIENDLY_NAME) == '58" Onn Roku TV Supports Ethernet'
+        state.attributes.get(ATTR_FRIENDLY_NAME) == '58" Onn Roku TV Supports ethernet'
     )
     assert state.attributes.get(ATTR_ICON) == "mdi:ethernet"
     assert ATTR_DEVICE_CLASS not in state.attributes
@@ -145,7 +152,7 @@ async def test_rokutv_binary_sensors(
     assert state.state == STATE_ON
     assert (
         state.attributes.get(ATTR_FRIENDLY_NAME)
-        == '58" Onn Roku TV Supports Find Remote'
+        == '58" Onn Roku TV Supports find remote'
     )
     assert state.attributes.get(ATTR_ICON) == "mdi:remote"
     assert ATTR_DEVICE_CLASS not in state.attributes

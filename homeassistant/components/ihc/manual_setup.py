@@ -12,7 +12,6 @@ from homeassistant.const import (
     CONF_UNIT_OF_MEASUREMENT,
     CONF_URL,
     CONF_USERNAME,
-    TEMP_CELSIUS,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import discovery
@@ -81,7 +80,7 @@ LIGHT_SCHEMA = DEVICE_SCHEMA.extend(
 )
 
 SENSOR_SCHEMA = DEVICE_SCHEMA.extend(
-    {vol.Optional(CONF_UNIT_OF_MEASUREMENT, default=TEMP_CELSIUS): cv.string}
+    {vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string}
 )
 
 IHC_SCHEMA = vol.Schema(
@@ -111,7 +110,7 @@ def get_manual_configuration(
     hass: HomeAssistant,
     config: ConfigType,
     controller_conf: ConfigType,
-    controller_id: int,
+    controller_id: str,
 ) -> None:
     """Get manual configuration for IHC devices."""
     for platform in IHC_PLATFORMS:

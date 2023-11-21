@@ -4,9 +4,14 @@ from unittest.mock import Mock, call
 from aiowebostv import WebOsTvPairError
 import pytest
 
-from homeassistant.components.notify import ATTR_MESSAGE, DOMAIN as NOTIFY_DOMAIN
+from homeassistant.components.notify import (
+    ATTR_DATA,
+    ATTR_MESSAGE,
+    DOMAIN as NOTIFY_DOMAIN,
+)
 from homeassistant.components.webostv import DOMAIN
-from homeassistant.const import CONF_ICON, CONF_SERVICE_DATA
+from homeassistant.const import ATTR_ICON
+from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from . import setup_webostv
@@ -16,7 +21,7 @@ ICON_PATH = "/some/path"
 MESSAGE = "one, two, testing, testing"
 
 
-async def test_notify(hass, client):
+async def test_notify(hass: HomeAssistant, client) -> None:
     """Test sending a message."""
     await setup_webostv(hass)
     assert hass.services.has_service(NOTIFY_DOMAIN, TV_NAME)
@@ -26,8 +31,8 @@ async def test_notify(hass, client):
         TV_NAME,
         {
             ATTR_MESSAGE: MESSAGE,
-            CONF_SERVICE_DATA: {
-                CONF_ICON: ICON_PATH,
+            ATTR_DATA: {
+                ATTR_ICON: ICON_PATH,
             },
         },
         blocking=True,
@@ -36,8 +41,37 @@ async def test_notify(hass, client):
     assert client.connect.call_count == 1
     client.send_message.assert_called_with(MESSAGE, icon_path=ICON_PATH)
 
+    await hass.services.async_call(
+        NOTIFY_DOMAIN,
+        TV_NAME,
+        {
+            ATTR_MESSAGE: MESSAGE,
+            ATTR_DATA: {
+                "OTHER_DATA": "not_used",
+            },
+        },
+        blocking=True,
+    )
+    assert client.mock_calls[0] == call.connect()
+    assert client.connect.call_count == 1
+    client.send_message.assert_called_with(MESSAGE, icon_path=None)
 
-async def test_notify_not_connected(hass, client, monkeypatch):
+    await hass.services.async_call(
+        NOTIFY_DOMAIN,
+        TV_NAME,
+        {
+            ATTR_MESSAGE: "only message, no data",
+        },
+        blocking=True,
+    )
+
+    assert client.connect.call_count == 1
+    assert client.send_message.call_args == call(
+        "only message, no data", icon_path=None
+    )
+
+
+async def test_notify_not_connected(hass: HomeAssistant, client, monkeypatch) -> None:
     """Test sending a message when client is not connected."""
     await setup_webostv(hass)
     assert hass.services.has_service(NOTIFY_DOMAIN, TV_NAME)
@@ -48,8 +82,8 @@ async def test_notify_not_connected(hass, client, monkeypatch):
         TV_NAME,
         {
             ATTR_MESSAGE: MESSAGE,
-            CONF_SERVICE_DATA: {
-                CONF_ICON: ICON_PATH,
+            ATTR_DATA: {
+                ATTR_ICON: ICON_PATH,
             },
         },
         blocking=True,
@@ -59,7 +93,9 @@ async def test_notify_not_connected(hass, client, monkeypatch):
     client.send_message.assert_called_with(MESSAGE, icon_path=ICON_PATH)
 
 
-async def test_icon_not_found(hass, caplog, client, monkeypatch):
+async def test_icon_not_found(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture, client, monkeypatch
+) -> None:
     """Test notify icon not found error."""
     await setup_webostv(hass)
     assert hass.services.has_service(NOTIFY_DOMAIN, TV_NAME)
@@ -70,8 +106,8 @@ async def test_icon_not_found(hass, caplog, client, monkeypatch):
         TV_NAME,
         {
             ATTR_MESSAGE: MESSAGE,
-            CONF_SERVICE_DATA: {
-                CONF_ICON: ICON_PATH,
+            ATTR_DATA: {
+                ATTR_ICON: ICON_PATH,
             },
         },
         blocking=True,
@@ -83,13 +119,20 @@ async def test_icon_not_found(hass, caplog, client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "side_effect,error",
+    ("side_effect", "error"),
     [
         (WebOsTvPairError, "Pairing with TV failed"),
         (ConnectionRefusedError, "TV unreachable"),
     ],
 )
-async def test_connection_errors(hass, caplog, client, monkeypatch, side_effect, error):
+async def test_connection_errors(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+    client,
+    monkeypatch,
+    side_effect,
+    error,
+) -> None:
     """Test connection errors scenarios."""
     await setup_webostv(hass)
     assert hass.services.has_service("notify", TV_NAME)
@@ -101,8 +144,8 @@ async def test_connection_errors(hass, caplog, client, monkeypatch, side_effect,
         TV_NAME,
         {
             ATTR_MESSAGE: MESSAGE,
-            CONF_SERVICE_DATA: {
-                CONF_ICON: ICON_PATH,
+            ATTR_DATA: {
+                ATTR_ICON: ICON_PATH,
             },
         },
         blocking=True,
@@ -113,7 +156,9 @@ async def test_connection_errors(hass, caplog, client, monkeypatch, side_effect,
     assert error in caplog.text
 
 
-async def test_no_discovery_info(hass, caplog):
+async def test_no_discovery_info(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
     """Test setup without discovery info."""
     assert NOTIFY_DOMAIN not in hass.config.components
     assert await async_setup_component(

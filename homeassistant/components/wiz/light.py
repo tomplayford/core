@@ -13,12 +13,9 @@ from homeassistant.components.light import (
     ATTR_EFFECT,
     ATTR_RGBW_COLOR,
     ATTR_RGBWW_COLOR,
-    COLOR_MODE_BRIGHTNESS,
-    COLOR_MODE_COLOR_TEMP,
-    COLOR_MODE_RGBW,
-    COLOR_MODE_RGBWW,
-    SUPPORT_EFFECT,
+    ColorMode,
     LightEntity,
+    LightEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -31,6 +28,8 @@ from homeassistant.util.color import (
 from .const import DOMAIN
 from .entity import WizToggleEntity
 from .models import WizData
+
+RGB_WHITE_CHANNELS_COLOR_MODE = {1: ColorMode.RGBW, 2: ColorMode.RGBWW}
 
 
 def _async_pilot_builder(**kwargs: Any) -> PilotBuilder:
@@ -72,32 +71,29 @@ async def async_setup_entry(
 class WizBulbEntity(WizToggleEntity, LightEntity):
     """Representation of WiZ Light bulb."""
 
+    _attr_name = None
+
     def __init__(self, wiz_data: WizData, name: str) -> None:
         """Initialize an WiZLight."""
         super().__init__(wiz_data, name)
         bulb_type: BulbType = self._device.bulbtype
         features: Features = bulb_type.features
-        color_modes = set()
+        self._attr_supported_color_modes: set[ColorMode | str] = set()
         if features.color:
-            if bulb_type.white_channels == 2:
-                color_modes.add(COLOR_MODE_RGBWW)
-            else:
-                color_modes.add(COLOR_MODE_RGBW)
+            self._attr_supported_color_modes.add(
+                RGB_WHITE_CHANNELS_COLOR_MODE[bulb_type.white_channels]
+            )
         if features.color_tmp:
-            color_modes.add(COLOR_MODE_COLOR_TEMP)
-        if not color_modes and features.brightness:
-            color_modes.add(COLOR_MODE_BRIGHTNESS)
-        self._attr_supported_color_modes = color_modes
+            self._attr_supported_color_modes.add(ColorMode.COLOR_TEMP)
+        if not self._attr_supported_color_modes and features.brightness:
+            self._attr_supported_color_modes.add(ColorMode.BRIGHTNESS)
         self._attr_effect_list = wiz_data.scenes
         if bulb_type.bulb_type != BulbClass.DW:
-            self._attr_min_mireds = color_temperature_kelvin_to_mired(
-                bulb_type.kelvin_range.max
-            )
-            self._attr_max_mireds = color_temperature_kelvin_to_mired(
-                bulb_type.kelvin_range.min
-            )
+            kelvin = bulb_type.kelvin_range
+            self._attr_min_mireds = color_temperature_kelvin_to_mired(kelvin.max)
+            self._attr_max_mireds = color_temperature_kelvin_to_mired(kelvin.min)
         if bulb_type.features.effect:
-            self._attr_supported_features = SUPPORT_EFFECT
+            self._attr_supported_features = LightEntityFeature.EFFECT
         self._async_update_attrs()
 
     @callback
@@ -108,22 +104,21 @@ class WizBulbEntity(WizToggleEntity, LightEntity):
         assert color_modes is not None
         if (brightness := state.get_brightness()) is not None:
             self._attr_brightness = max(0, min(255, brightness))
-        if (
-            COLOR_MODE_COLOR_TEMP in color_modes
-            and (color_temp := state.get_colortemp()) is not None
+        if ColorMode.COLOR_TEMP in color_modes and (
+            color_temp := state.get_colortemp()
         ):
-            self._attr_color_mode = COLOR_MODE_COLOR_TEMP
+            self._attr_color_mode = ColorMode.COLOR_TEMP
             self._attr_color_temp = color_temperature_kelvin_to_mired(color_temp)
         elif (
-            COLOR_MODE_RGBWW in color_modes and (rgbww := state.get_rgbww()) is not None
+            ColorMode.RGBWW in color_modes and (rgbww := state.get_rgbww()) is not None
         ):
             self._attr_rgbww_color = rgbww
-            self._attr_color_mode = COLOR_MODE_RGBWW
-        elif COLOR_MODE_RGBW in color_modes and (rgbw := state.get_rgbw()) is not None:
+            self._attr_color_mode = ColorMode.RGBWW
+        elif ColorMode.RGBW in color_modes and (rgbw := state.get_rgbw()) is not None:
             self._attr_rgbw_color = rgbw
-            self._attr_color_mode = COLOR_MODE_RGBW
+            self._attr_color_mode = ColorMode.RGBW
         else:
-            self._attr_color_mode = COLOR_MODE_BRIGHTNESS
+            self._attr_color_mode = ColorMode.BRIGHTNESS
         self._attr_effect = state.get_scene()
         super()._async_update_attrs()
 
