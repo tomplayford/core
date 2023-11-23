@@ -253,6 +253,9 @@ aioguardian==2022.07.0
 # homeassistant.components.harmony
 aioharmony==0.2.10
 
+# homeassistant.components.helvar
+aiohelvar==0.9.3
+
 # homeassistant.components.homekit_controller
 aiohomekit==3.0.9
 

@@ -5,6 +5,8 @@ import aiohelvar
 
 from homeassistant.exceptions import ConfigEntryNotReady
 
+from .const import CONF_HOST, CONF_PORT
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -21,14 +23,20 @@ class HelvarRouter:
     @property
     def host(self):
         """Return the host of this router."""
-        return self.config_entry.data["host"]
+        return self.config_entry.data[CONF_HOST]
+
+    @property
+    def port(self):
+        """Return the host of this router."""
+        return self.config_entry.data[CONF_PORT]
 
     async def async_setup(self, tries=0):
-        """Set up a helval router based on host parameter."""
+        """Set up a helval router based on host paramete50000r."""
         host = self.host
+        port = self.port
         hass = self.hass
 
-        router = aiohelvar.Router(host, 50000)
+        router = aiohelvar.Router(host, port)
 
         try:
             await router.connect()

@@ -193,6 +193,7 @@ FLOWS = {
         "guardian",
         "habitica",
         "harmony",
+        "helvar",
         "heos",
         "here_travel_time",
         "hisense_aehw4a1",

@@ -11,12 +11,18 @@ from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN
+from .const import CONF_HOST, CONF_PORT, DEFAULT_PORT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema({"host": str})
+STEP_USER_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_HOST): cv.string,
+        vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+    }
+)
 
 
 @config_entries.HANDLERS.register(DOMAIN)
@@ -38,7 +44,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
         """
-        router = aiohelvar.Router((data["host"]), 50000)
+        router = aiohelvar.Router((data[CONF_HOST]), data[CONF_PORT])
 
         try:
             await router.connect()

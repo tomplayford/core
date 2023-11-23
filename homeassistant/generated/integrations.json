@@ -2334,6 +2334,11 @@
         "zwave"
       ]
     },
+    "helvar": {
+      "integration_type": "hub",
+      "config_flow": true,
+      "iot_class": "local_push"
+    },
     "here_travel_time": {
       "name": "HERE Travel Time",
       "integration_type": "hub",
@@ -6831,6 +6836,7 @@
     "google_travel_time",
     "group",
     "growatt_server",
+    "helvar",
     "homekit_controller",
     "input_boolean",
     "input_button",

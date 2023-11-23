@@ -1,17 +1,14 @@
 {
   "domain": "helvar",
-  "name": "HelvarNet",
+  "name": "Helvar",
+  "codeowners": ["@tomplayford"],
   "config_flow": true,
-  "documentation": "https://www.home-assistant.io/integrations/helvar",
-  "requirements": ["aiohelvar>=0.9.0"],
-  "ssdp": [],
-  "zeroconf": [],
-  "homekit": {},
   "dependencies": [],
+  "documentation": "https://www.home-assistant.io/integrations/helvar",
+  "homekit": {},
   "iot_class": "local_push",
-  "quality_scale": "mud",
   "loggers": ["aiohelvar"],
-  "codeowners": [
-    "@tomplayford"
-  ]
+  "requirements": ["aiohelvar==0.9.3"],
+  "ssdp": [],
+  "zeroconf": []
 }
